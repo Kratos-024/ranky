@@ -14,7 +14,24 @@ let inactivityTimeout: NodeJS.Timeout | undefined;
 let dailyStats: DailyStats;
 let isTracking = false;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
+  const session = await vscode.authentication.getSession(
+    "github",
+    ["read:user"],
+    {
+      createIfNone: true,
+    }
+  );
+
+  if (session) {
+    const token = session.accessToken;
+    vscode.window.showInformationMessage(
+      `Authenticated as ${session.account.label} ${token}`
+    );
+  } else {
+    vscode.window.showErrorMessage("GitHub Authentication failed.");
+  }
+
   console.log('Congratulations, your extension "ranky" is now active!');
 
   timer = new Timer();

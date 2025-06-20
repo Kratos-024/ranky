@@ -25,6 +25,13 @@
         "command": "ranky.showTime",
         "title": "Time"
       }
+    ],
+    "authentication": [
+      {
+        "id": "github",
+        "label": "GitHub",
+        "supportsMultipleAccounts": false
+      }
     ]
   },
   "scripts": {
