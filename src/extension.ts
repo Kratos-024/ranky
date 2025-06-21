@@ -9,13 +9,19 @@ interface DailyStats {
   languages: Set<string>;
 }
 
-interface GitHubUser {
-  login: string;
-  id: number;
-  email: string | null;
-  name?: string;
-  avatar_url?: string;
-  token: string;
+interface RankyUser {
+  userId: string;
+  email?: string;
+  username?: string;
+  [key: string]: any;
+}
+
+interface TokenPayload {
+  userId: string;
+  email?: string;
+  username?: string;
+  iat?: number;
+  exp?: number;
   [key: string]: any;
 }
 
@@ -23,179 +29,217 @@ let timer: Timer;
 let inactivityTimeout: NodeJS.Timeout | undefined;
 let dailyStats: DailyStats;
 let isTracking = false;
-let githubUser: GitHubUser | null = null;
+let rankyUser: RankyUser | null = null;
 
-const FIRST_TIME_SETUP_KEY = "ranky.firstTimeSetup";
+const RANKY_AUTH_KEY = "ranky-user-auth";
+const RANKY_TOKEN_KEY = "ranky-auth-token";
 
-async function authenticateWithGitHub(): Promise<GitHubUser | null> {
+// JWT parsing utility (simple implementation)
+function parseJWT(token: string): TokenPayload | null {
   try {
-    const session = await vscode.authentication.getSession(
-      "github",
-      ["read:user", "user:email"],
-      { createIfNone: true }
+    const base64Url = token.split(".")[1];
+    if (!base64Url) {
+      throw new Error("Invalid token format");
+    }
+
+    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split("")
+        .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+        .join("")
     );
 
-    if (!session) {
-      throw new Error("Failed to authenticate with GitHub");
-    }
-
-    const token = session.accessToken;
-
-    const userInfoResponse = await fetch("https://api.github.com/user", {
-      method: "GET",
-      headers: {
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!userInfoResponse.ok) {
-      throw new Error(`GitHub API error: ${userInfoResponse.status}`);
-    }
-
-    const userInfo = (await userInfoResponse.json()) as GitHubUser;
-
-    const githubUserData: GitHubUser = {
-      login: userInfo.login,
-      id: userInfo.id,
-      email: userInfo.email,
-      name: userInfo.name,
-      avatar_url: userInfo.avatar_url,
-      token: token,
-    };
-
-    return githubUserData;
+    return JSON.parse(jsonPayload);
   } catch (error) {
-    console.error("GitHub authentication failed:", error);
-    vscode.window.showErrorMessage(`GitHub Authentication failed: ${error}`);
+    console.error("Error parsing JWT:", error);
     return null;
   }
 }
 
-async function createUserStatsOnFirstInstall(context: vscode.ExtensionContext) {
+async function verifyAuthWithBackend(userId: string): Promise<boolean> {
   try {
-    // Check if this is the first time the extension is running
-    const hasRunBefore = context.globalState.get(FIRST_TIME_SETUP_KEY, false);
-
-    if (hasRunBefore) {
-      console.log("Extension has already been initialized before");
-      return;
-    }
-
-    if (!githubUser) {
-      console.error("No GitHub user data available for first-time setup");
-      return;
-    }
-
-    const today = new Date().toISOString().split("T")[0];
-
-    const payload = {
-      name: githubUser.name || githubUser.login,
-      username: githubUser.login,
-      uniqueId: githubUser.id.toString(),
-      email: githubUser.email || "",
-      date: today,
-    };
-
-    console.log("Creating user stats for first-time installation:", payload);
-
-    const response = await makeSecureRequest(
-      "http://localhost:8000/api/v1/extension/create-stats",
-      { payload: payload }
-    );
-
-    if (response) {
-      console.log("✅ Successfully created user account and stats");
-
-      // Mark that the extension has been set up
-      await context.globalState.update(FIRST_TIME_SETUP_KEY, true);
-
-      vscode.window.showInformationMessage(
-        "🎉 Welcome to Ranky! Your coding stats tracking has been set up successfully."
-      );
-    } else {
-      console.log("❌ Failed to create user stats");
-      vscode.window.showWarningMessage(
-        "Failed to set up your coding stats. Please try restarting VS Code."
-      );
-    }
-  } catch (error) {
-    console.error("Error during first-time setup:", error);
-    vscode.window.showErrorMessage(
-      "Error occurred during setup. Please check your internet connection and try again."
-    );
-  }
-}
-
-async function makeSecureRequest(endpoint: string, data: any = null) {
-  if (!githubUser) {
-    console.error("No GitHub user data available");
-    return null;
-  }
-
-  const requestBody = {
-    ...data,
-    github: {
-      token: githubUser.token,
-      username: githubUser.login,
-      email: githubUser.email,
-      id: githubUser.id,
-    },
-  };
-
-  try {
-    const response = await fetch(endpoint, {
-      method: data ? "POST" : "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${githubUser.token}`,
-      },
-      body: data ? JSON.stringify(requestBody) : undefined,
-    });
-
-    if (response.status === 401) {
-      // Token expired, re-authenticate
-      console.log("Token expired, re-authenticating...");
-      githubUser = await authenticateWithGitHub();
-      if (githubUser) {
-        // Retry the request with new token
-        return makeSecureRequest(endpoint, data);
+    const response = await fetch(
+      "http://localhost:8000/api/v1/users/verify-extension-auth",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          secretToken: userId,
+        }),
       }
+    );
+
+    if (response.ok) {
+      const result = await response.json();
+      return result.success === true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Backend verification failed:", error);
+    return false;
+  }
+}
+
+async function promptForToken(): Promise<string | undefined> {
+  const token = await vscode.window.showInputBox({
+    prompt: "Please enter your Ranky authentication token",
+    placeHolder: "Enter the token generated by Ranky website",
+    password: true, // Hide the token input
+    validateInput: (value: string) => {
+      if (!value || value.trim().length === 0) {
+        return "Token cannot be empty";
+      }
+
+      // Basic JWT format validation
+      const parts = value.split(".");
+      if (parts.length !== 3) {
+        return "Invalid token format. Please ensure you copied the complete token.";
+      }
+
+      return null;
+    },
+  });
+
+  return token?.trim();
+}
+
+async function authenticateWithToken(
+  context: vscode.ExtensionContext
+): Promise<RankyUser | null> {
+  try {
+    // Check if we already have stored auth data
+    const storedUser = await context.secrets.get(RANKY_AUTH_KEY);
+    const storedToken = await context.secrets.get(RANKY_TOKEN_KEY);
+
+    if (storedUser && storedToken) {
+      try {
+        const userData = JSON.parse(storedUser);
+        console.log("Found existing authentication data");
+
+        // Verify the stored token is still valid
+        const isValid = await verifyAuthWithBackend(userData.userId);
+        if (isValid) {
+          return userData;
+        } else {
+          console.log("Stored authentication is no longer valid, clearing...");
+          await context.secrets.delete(RANKY_AUTH_KEY);
+          await context.secrets.delete(RANKY_TOKEN_KEY);
+        }
+      } catch (error) {
+        console.error("Error parsing stored user data:", error);
+        await context.secrets.delete(RANKY_AUTH_KEY);
+        await context.secrets.delete(RANKY_TOKEN_KEY);
+      }
+    }
+
+    // Prompt for new token
+    const token = await promptForToken();
+    if (!token) {
       return null;
     }
 
-    return response.json();
-  } catch (error) {
-    console.error("Request failed:", error);
+    // Parse the token
+    const payload = parseJWT(token);
+    if (!payload || !payload.userId) {
+      vscode.window.showErrorMessage(
+        "Invalid token: Unable to extract user information"
+      );
+      return null;
+    }
+
+    console.log("Token parsed successfully, verifying with backend...");
+
+    // Verify with backend
+    const isVerified = await verifyAuthWithBackend(payload.userId);
+    if (!isVerified) {
+      vscode.window.showErrorMessage(
+        "Authentication failed: Token verification unsuccessful"
+      );
+      return null;
+    }
+
+    console.log("Backend verification successful");
+
+    // Create user object
+    const userData: RankyUser = {
+      userId: payload.userId,
+      email: payload.email,
+      username: payload.username,
+    };
+
+    // Store in VS Code secret storage
+    await context.secrets.store(RANKY_AUTH_KEY, JSON.stringify(userData));
+    await context.secrets.store(RANKY_TOKEN_KEY, token);
+
+    return userData;
+  } catch (error: any) {
+    console.error("Token authentication failed:", error);
+    vscode.window.showErrorMessage(
+      `Authentication failed: ${error.message || "Unknown error occurred"}`
+    );
     return null;
+  }
+}
+
+async function clearAuthenticationData(context: vscode.ExtensionContext) {
+  try {
+    await context.secrets.delete(RANKY_AUTH_KEY);
+    await context.secrets.delete(RANKY_TOKEN_KEY);
+    rankyUser = null;
+    console.log("Authentication data cleared");
+  } catch (error) {
+    console.error("Error clearing authentication data:", error);
   }
 }
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Congratulations, your extension "ranky" is now active!');
 
-  // Authenticate with GitHub and get user data
-  githubUser = await authenticateWithGitHub();
+  // Add cleanup for when extension is disposed
+  context.subscriptions.push({
+    dispose: () => {
+      if (timer && timer.isRunning()) {
+        endSession();
+      }
+      if (inactivityTimeout) {
+        clearTimeout(inactivityTimeout);
+      }
+      rankyUser = null;
+    },
+  });
 
-  if (githubUser) {
-    vscode.window.showInformationMessage(
-      `✅ Authenticated as ${githubUser.login} (${
-        githubUser.email || "No email"
-      })`
+  // Add a small delay to ensure VS Code is fully loaded
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  try {
+    rankyUser = await authenticateWithToken(context);
+
+    if (rankyUser) {
+      vscode.window.showInformationMessage(
+        `✅ Authenticated as ${rankyUser.username || rankyUser.userId} ${
+          rankyUser.email ? `(${rankyUser.email})` : ""
+        }`
+      );
+      console.log("Ranky user authenticated:", {
+        userId: rankyUser.userId,
+        username: rankyUser.username,
+        email: rankyUser.email,
+      });
+    } else {
+      vscode.window.showWarningMessage("❌ Ranky Authentication failed.");
+      vscode.window.showInformationMessage(
+        "Extension loaded without authentication. Use 'Ranky: Refresh Auth' command to authenticate later."
+      );
+    }
+  } catch (error) {
+    console.error("Authentication error during activation:", error);
+    vscode.window.showErrorMessage(
+      "Failed to authenticate during extension startup. You can retry using the 'Ranky: Refresh Auth' command."
     );
-    console.log("GitHub user data:", {
-      username: githubUser.login,
-      email: githubUser.email,
-      id: githubUser.id,
-      tokenPrefix: githubUser.token.substring(0, 10) + "...",
-    });
-
-    // Call first-time setup after successful authentication
-    await createUserStatsOnFirstInstall(context);
-  } else {
-    vscode.window.showErrorMessage("❌ GitHub Authentication failed.");
-    return; // Exit if authentication fails
   }
 
   timer = new Timer();
@@ -214,16 +258,72 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  // Command to refresh GitHub authentication
+  // Command to refresh Ranky authentication
   const refreshAuthCommand = vscode.commands.registerCommand(
     "ranky.refreshAuth",
     async () => {
-      githubUser = await authenticateWithGitHub();
-      if (githubUser) {
+      try {
         vscode.window.showInformationMessage(
-          `✅ Re-authenticated as ${githubUser.login} (${
-            githubUser.email || "No email"
-          })`
+          "Attempting to refresh Ranky authentication..."
+        );
+
+        // Clear existing auth data
+        await clearAuthenticationData(context);
+
+        rankyUser = await authenticateWithToken(context);
+        if (rankyUser) {
+          vscode.window.showInformationMessage(
+            `✅ Re-authenticated as ${rankyUser.username || rankyUser.userId} ${
+              rankyUser.email ? `(${rankyUser.email})` : ""
+            }`
+          );
+        } else {
+          vscode.window.showErrorMessage(
+            "❌ Authentication failed. Please check your token and try again."
+          );
+        }
+      } catch (error) {
+        console.error("Manual authentication failed:", error);
+        vscode.window.showErrorMessage(
+          "Authentication failed. Please check your token and try again."
+        );
+      }
+    }
+  );
+
+  // Command to clear authentication data
+  const clearAuthCommand = vscode.commands.registerCommand(
+    "ranky.clearAuth",
+    async () => {
+      try {
+        await clearAuthenticationData(context);
+        vscode.window.showInformationMessage(
+          "Authentication data cleared. Use 'Ranky: Refresh Auth' to re-authenticate."
+        );
+      } catch (error) {
+        console.error("Error clearing authentication:", error);
+        vscode.window.showErrorMessage("Failed to clear authentication data.");
+      }
+    }
+  );
+
+  // Command to manually enter token (useful if user wants to change token)
+  const enterTokenCommand = vscode.commands.registerCommand(
+    "ranky.enterToken",
+    async () => {
+      try {
+        await clearAuthenticationData(context);
+        rankyUser = await authenticateWithToken(context);
+
+        if (rankyUser) {
+          vscode.window.showInformationMessage(
+            `✅ Successfully authenticated with new token`
+          );
+        }
+      } catch (error) {
+        console.error("Token entry failed:", error);
+        vscode.window.showErrorMessage(
+          "Failed to authenticate with the provided token."
         );
       }
     }
@@ -232,7 +332,9 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     textChangeDisposable,
     showStatsCommand,
-    refreshAuthCommand
+    refreshAuthCommand,
+    clearAuthCommand,
+    enterTokenCommand
   );
 }
 
@@ -310,7 +412,9 @@ function showCurrentStats() {
   const totalTime = dailyStats.totalTime + currentSessionTime;
 
   let statsMessage = `📊 Today's Coding Stats:\n`;
-  statsMessage += `👤 User: ${githubUser?.login || "Unknown"}\n`;
+  statsMessage += `👤 User: ${
+    rankyUser?.username || rankyUser?.userId || "Unknown"
+  }\n`;
   statsMessage += `⏱️ Total Time: ${Math.round(totalTime)}s (${(
     totalTime / 60
   ).toFixed(1)}min)\n`;
@@ -323,50 +427,4 @@ function showCurrentStats() {
   vscode.window.showInformationMessage(statsMessage);
 }
 
-export async function deactivate() {
-  if (timer && timer.isRunning()) {
-    endSession();
-  }
-
-  if (inactivityTimeout) {
-    clearTimeout(inactivityTimeout);
-  }
-
-  if (!githubUser) {
-    console.log("No GitHub user data available for sending stats");
-    return;
-  }
-
-  const languagesArray = Array.from(dailyStats.languages);
-
-  const payload = {
-    date: dailyStats.date,
-    totalTimeSeconds: dailyStats.totalTime,
-    totalTimeMinutes: Math.round((dailyStats.totalTime / 60) * 100) / 100,
-    totalWords: dailyStats.totalWords,
-    totalLines: dailyStats.totalLines,
-    languages: languagesArray,
-  };
-
-  console.log("Sending daily coding stats with GitHub user data:", {
-    payload,
-    token: githubUser.token,
-    user: githubUser.login,
-    email: githubUser.email,
-  });
-
-  try {
-    const response = await makeSecureRequest(
-      "http://localhost:8000/api/v1/extension/coding-stats",
-      { payload: payload }
-    );
-
-    if (response) {
-      console.log("Successfully sent coding stats to endpoint");
-    } else {
-      console.log("Failed to send coding stats");
-    }
-  } catch (error) {
-    console.log("Error sending coding stats:", error);
-  }
-}
+export async function deactivate() {}

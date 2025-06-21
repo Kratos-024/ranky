@@ -18,19 +18,29 @@
   "contributes": {
     "commands": [
       {
-        "command": "ranky.helloWorld",
-        "title": "Hello World"
+        "command": "ranky.showStats",
+        "title": "Show Stats",
+        "category": "Ranky"
       },
       {
-        "command": "ranky.showTime",
-        "title": "Time"
-      }
-    ],
-    "authentication": [
+        "command": "ranky.authenticate",
+        "title": "Authenticate",
+        "category": "Ranky"
+      },
       {
-        "id": "github",
-        "label": "GitHub",
-        "supportsMultipleAccounts": false
+        "command": "ranky.logout",
+        "title": "Logout",
+        "category": "Ranky"
+      },
+      {
+        "command": "ranky.refreshAuth",
+        "title": "Logout",
+        "category": "Ranky"
+      },
+      {
+        "command": "ranky.clearAuth",
+        "title": "Clear Auth",
+        "category": "Ranky"
       }
     ]
   },
