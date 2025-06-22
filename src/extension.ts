@@ -757,7 +757,7 @@ function handleUserCoding(e: vscode.TextDocumentChangeEvent) {
 
 function endSession() {
   if (timer.isRunning()) {
-    const sessionTime = timer.getElapsedSeconds();
+    const sessionTime = timer.getElapsedMinutes();
     dailyStats.totalTimeMinutes += sessionTime;
     timer.stop();
     isTracking = false;
